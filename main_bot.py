@@ -1,147 +1,219 @@
 #!/usr/bin/env python3
 """
-MAIN MANAGER BOT - Hosted on Railway
-Handles user registration, trials, referrals, payments
+MAIN BOT HOSTING MANAGER
+Version 2.0 - Complete Solution
 """
 
 import os
+import sys
 import logging
 import asyncio
 from datetime import datetime, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import (
-    Application, CommandHandler, CallbackQueryHandler,
-    MessageHandler, filters, ContextTypes
-)
-import psycopg2
-from psycopg2.extras import RealDictCursor
-from dotenv import load_dotenv
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 
-# Load environment
+# ==================== CONFIGURATION ====================
+from dotenv import load_dotenv
 load_dotenv()
 
-# Bot Configuration
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 DATABASE_URL = os.getenv("DATABASE_URL")
-ADMIN_ID = int(os.getenv("ADMIN_ID", 7971284841))
-ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "@CyperXploit")
+ADMIN_ID = 7971284841
+ADMIN_USERNAME = "@CyperXploit"
 
-# Logging
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
-logger = logging.getLogger(__name__)
+# CRITICAL CHECK
+if not BOT_TOKEN:
+    print("❌ ERROR: BOT_TOKEN not found in Railway Variables!")
+    print("Go to: Project → Variables → Add BOT_TOKEN")
+    sys.exit(1)
 
-# Database Class
-class Database:
+# ==================== DATABASE SETUP ====================
+import psycopg2
+from psycopg2.extras import RealDictCursor
+
+class DatabaseManager:
     def __init__(self):
         self.conn = None
         self.connect()
     
     def connect(self):
-        """Connect to PostgreSQL"""
         try:
             self.conn = psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
             self.init_tables()
-            logger.info("Database connected successfully")
+            print("✅ Database Connected")
         except Exception as e:
-            logger.error(f"Database connection failed: {e}")
+            print(f"⚠️ Database Warning: {e}")
     
     def init_tables(self):
-        """Initialize all required tables"""
-        with self.conn.cursor() as cur:
-            # Users table
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS users (
-                    id SERIAL PRIMARY KEY,
-                    user_id BIGINT UNIQUE NOT NULL,
-                    username VARCHAR(255),
-                    first_name VARCHAR(255),
-                    last_name VARCHAR(255),
-                    trial_start TIMESTAMP,
-                    trial_end TIMESTAMP,
-                    bot_expiry TIMESTAMP,
-                    premium_status BOOLEAN DEFAULT FALSE,
-                    plan_type VARCHAR(50) DEFAULT 'trial',
-                    bot_token VARCHAR(255),
-                    bot_username VARCHAR(255),
-                    bot_active BOOLEAN DEFAULT FALSE,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
-            
-            # Referrals table
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS referrals (
-                    id SERIAL PRIMARY KEY,
-                    referrer_id BIGINT NOT NULL,
-                    referred_id BIGINT NOT NULL,
-                    bonus_active BOOLEAN DEFAULT TRUE,
-                    bonus_hours INTEGER DEFAULT 2,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    UNIQUE(referrer_id, referred_id)
-                )
-            """)
-            
-            # Payments table
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS payments (
-                    id SERIAL PRIMARY KEY,
-                    user_id BIGINT NOT NULL,
-                    amount DECIMAL(10,2),
-                    payment_method VARCHAR(100),
-                    transaction_id VARCHAR(255),
-                    status VARCHAR(50) DEFAULT 'pending',
-                    plan_type VARCHAR(50),
-                    bot_hours INTEGER,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
-            
-            # Bot deployments table
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS bot_deployments (
-                    id SERIAL PRIMARY KEY,
-                    user_id BIGINT NOT NULL,
-                    bot_name VARCHAR(255),
-                    railway_project_id VARCHAR(255),
-                    railway_service_id VARCHAR(255),
-                    deployment_url VARCHAR(500),
-                    status VARCHAR(50) DEFAULT 'active',
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
-            
-            self.conn.commit()
+        try:
+            with self.conn.cursor() as cur:
+                # Users table
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS users (
+                        user_id BIGINT PRIMARY KEY,
+                        username VARCHAR(100),
+                        first_name VARCHAR(100),
+                        status VARCHAR(20) DEFAULT 'active',
+                        trial_end TIMESTAMP,
+                        plan VARCHAR(20) DEFAULT 'trial',
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
+                # Deployments table
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS deployments (
+                        id SERIAL PRIMARY KEY,
+                        user_id BIGINT,
+                        bot_name VARCHAR(100),
+                        status VARCHAR(20) DEFAULT 'pending',
+                        files_uploaded BOOLEAN DEFAULT FALSE,
+                        bot_token VARCHAR(200),
+                        railway_url VARCHAR(500),
+                        cancel_requested BOOLEAN DEFAULT FALSE,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
+                # Referrals table
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS referrals (
+                        id SERIAL PRIMARY KEY,
+                        referrer_id BIGINT,
+                        referred_id BIGINT,
+                        bonus_given BOOLEAN DEFAULT FALSE,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
+                self.conn.commit()
+        except Exception as e:
+            print(f"⚠️ Table Error: {e}")
+
+db = DatabaseManager()
+
+# ==================== BOT HANDLERS ====================
+
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Modern Start Command with Beautiful Design"""
+    user = update.effective_user
     
-    def get_user(self, user_id):
-        """Get user by ID"""
-        with self.conn.cursor() as cur:
-            cur.execute("SELECT * FROM users WHERE user_id = %s", (user_id,))
-            return cur.fetchone()
-    
-    def create_user(self, user_data):
-        """Create new user with trial"""
-        with self.conn.cursor() as cur:
-            trial_start = datetime.now()
-            trial_end = trial_start + timedelta(days=3)
-            
+    # Register user in database
+    try:
+        with db.conn.cursor() as cur:
             cur.execute("""
-                INSERT INTO users 
-                (user_id, username, first_name, last_name, trial_start, trial_end, bot_expiry)
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT (user_id) DO NOTHING
-                RETURNING *
-            """, (
-                user_data['id'],
-                user_data.get('username'),
-                user_data.get('first_name'),
-                user_data.get('last_name'),
-                trial_start,
-                trial_end,
-                trial_end
+                INSERT INTO users (user_id, username, first_name, trial_end)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (user_id) DO UPDATE
+                SET username = EXCLUDED.username
+            """, (user.id, user.username, user.first_name, datetime.now() + timedelta(days=3)))
+            db.conn.commit()
+    except:
+        pass
+    
+    # BEAUTIFUL KEYBOARD DESIGN
+    keyboard = [
+        [InlineKeyboardButton("🚀 START FREE TRIAL", callback_data="start_trial")],
+        [InlineKeyboardButton("💎 UPGRADE TO PREMIUM", callback_data="buy_premium")],
+        [InlineKeyboardButton("🤖 DEPLOY YOUR BOT", callback_data="deploy_bot")],
+        [InlineKeyboardButton("📊 MY DASHBOARD", callback_data="my_dashboard")],
+        [InlineKeyboardButton("👥 REFER & EARN (+2H)", callback_data="refer_friend")],
+        [InlineKeyboardButton("❓ HELP & SUPPORT", callback_data="help_support")]
+    ]
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    # MODERN WELCOME MESSAGE
+    welcome_msg = f"""
+✨ **WELCOME {user.first_name}!** ✨
+
+🤖 **PREMIUM BOT HOSTING SERVICE**
+✅ 3 Days FREE Trial • Auto Deployment
+✅ Premium Features • 24/7 Support
+✅ Easy Setup • Secure Hosting
+
+⚡ **QUICK START:**
+1. Click *START FREE TRIAL*
+2. Upload your `bot.py` & `requirements.txt`
+3. We deploy on Railway instantly!
+
+🎁 **BONUS:** Get 2 FREE hours for each referral!
+
+📞 **Admin:** {ADMIN_USERNAME}
+🆔 **Your ID:** `{user.id}`
+
+👇 **SELECT AN OPTION BELOW:**
+    """
+    
+    await update.message.reply_text(welcome_msg, reply_markup=reply_markup, parse_mode='Markdown')
+
+async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """MAIN CALLBACK HANDLER - ALL BUTTON CLICKS"""
+    query = update.callback_query
+    await query.answer()
+    
+    data = query.data
+    user_id = query.from_user.id
+    
+    # ========== START TRIAL ==========
+    if data == "start_trial":
+        try:
+            with db.conn.cursor() as cur:
+                trial_end = datetime.now() + timedelta(days=3)
+                cur.execute("""
+                    UPDATE users SET trial_end = %s, plan = 'trial'
+                    WHERE user_id = %s
+                """, (trial_end, user_id))
+                db.conn.commit()
+            
+            await query.edit_message_text(
+                text=f"""
+✅ **FREE TRIAL ACTIVATED!**
+
+🎉 Congratulations! Your 3-day free trial is now active.
+📅 Trial Ends: {trial_end.strftime('%d %B %Y, %I:%M %p')}
+
+🚀 **NEXT STEPS:**
+1. Click *DEPLOY YOUR BOT* to upload your files
+2. We'll host your bot instantly
+3. Enjoy premium features for FREE
+
+💡 **Tip:** Refer friends to get extra hours!
+                """,
+                parse_mode='Markdown',
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🤖 DEPLOY BOT NOW", callback_data="deploy_bot")],
+                    [InlineKeyboardButton("📊 GO TO DASHBOARD", callback_data="my_dashboard")]
+                ])
+            )
+        except Exception as e:
+            await query.edit_message_text("❌ Error starting trial. Contact admin.")
+    
+    # ========== DEPLOY BOT ==========
+    elif data == "deploy_bot":
+        deploy_guide = """
+📦 **HOW TO DEPLOY YOUR BOT**
+
+✅ **YOU NEED ONLY 2 FILES:**
+
+1️⃣ **`bot.py`** - Your main bot script
+2️⃣ **`requirements.txt`** - Python libraries list
+
+📝 **FILE REQUIREMENTS:**
+
+**bot.py (Example):**
+```python
+import os
+from telegram import Update
+from telegram.ext import Application, CommandHandler
+
+BOT_TOKEN = os.getenv("BOT_TOKEN")  # ✅ CORRECT
+
+async def start(update: Update, context):
+    await update.message.reply_text("Hello!")
+
+if __name__ == "__main__":
+    app = Application.builder().token(BOT_TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.run_polling()                trial_end
             ))
             
             user = cur.fetchone()
