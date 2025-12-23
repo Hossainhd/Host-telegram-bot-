@@ -1,3 +1,0 @@
-web: python main_bot.py
-worker: python bot_manager.py
-deployer: python bot_deployer.py
